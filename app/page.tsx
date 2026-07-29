@@ -13,7 +13,7 @@ type AppState = {
   bills: Bill[]; purchases: Purchase[]; goals: Goal[];
 };
 
-const today = new Date("2026-08-03T12:00:00");
+const today = new Date();
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 const addDays = (date: string, days: number) => {
   const d = new Date(`${date}T12:00:00`); d.setDate(d.getDate() + days); return iso(d);
@@ -49,11 +49,13 @@ const seed: AppState = {
 };
 
 const recurrenceDays: Record<string, number> = { Weekly: 7, Monthly: 30, Quarterly: 91, Biannual: 182, Yearly: 365 };
+const weekDays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+type Editor = { kind: "bill"; id?: string } | { kind: "purchase"; id?: string };
 
 export default function Home() {
   const [data, setData] = useState<AppState>(seed);
   const [tab, setTab] = useState<"plan" | "goals">("plan");
-  const [modal, setModal] = useState<"bill" | "purchase" | null>(null);
+  const [editor, setEditor] = useState<Editor | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [authRequired, setAuthRequired] = useState(false);
 
@@ -95,33 +97,48 @@ export default function Home() {
   const update = <K extends keyof AppState>(key: K, value: AppState[K]) => setData(d => ({ ...d, [key]: value }));
   const moveWeek = (n: number) => update("selectedWeek", addDays(week, n * 7));
 
-  function addBill(e: FormEvent<HTMLFormElement>) {
+  function saveBill(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const f = new FormData(e.currentTarget);
     const base: Bill = {
-      id: uid(), biller: String(f.get("biller")), amount: Number(f.get("amount")),
+      id: editor?.id || uid(), biller: String(f.get("biller")), amount: Number(f.get("amount")),
       due: String(f.get("due")), frequency: String(f.get("frequency")),
       allocationStart: f.get("allocate") ? String(f.get("allocationStart")) : undefined,
       installments: f.get("allocate") ? Number(f.get("installments")) || 1 : 1,
     };
+    if (editor?.id) {
+      setData(d => ({ ...d, bills: d.bills.map(b => b.id === editor.id ? { ...base, occurrence: b.occurrence } : b) }));
+      setEditor(null);
+      return;
+    }
     const bills = [base];
     const days = recurrenceDays[base.frequency];
     if (days) for (let i = 1; i <= 5; i++) bills.push({ ...base, id: uid(), due: addDays(base.due, days * i), occurrence: true, allocationStart: undefined });
     setData(d => ({ ...d, bills: [...d.bills, ...bills] }));
-    setModal(null);
+    setEditor(null);
   }
 
-  function addPurchase(e: FormEvent<HTMLFormElement>) {
+  function savePurchase(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const f = new FormData(e.currentTarget);
     const p: Purchase = {
-      id: uid(), what: String(f.get("what")), amount: Number(f.get("amount")), date: String(f.get("date")),
+      id: editor?.id || uid(), what: String(f.get("what")), amount: Number(f.get("amount")), date: String(f.get("date")),
       allocationStart: f.get("allocate") ? String(f.get("allocationStart")) : undefined,
       installments: f.get("allocate") ? Number(f.get("installments")) || 1 : 1,
     };
-    setData(d => ({ ...d, purchases: [...d.purchases, p] }));
-    setModal(null);
+    setData(d => ({ ...d, purchases: editor?.id ? d.purchases.map(item => item.id === editor.id ? p : item) : [...d.purchases, p] }));
+    setEditor(null);
   }
+
+  const editingBill = editor?.kind === "bill" && editor.id ? data.bills.find(b => b.id === editor.id) : undefined;
+  const editingPurchase = editor?.kind === "purchase" && editor.id ? data.purchases.find(p => p.id === editor.id) : undefined;
+  const removeEntry = () => {
+    if (!editor?.id || !confirm("Delete this entry?")) return;
+    setData(d => editor.kind === "bill"
+      ? { ...d, bills: d.bills.filter(b => b.id !== editor.id) }
+      : { ...d, purchases: d.purchases.filter(p => p.id !== editor.id) });
+    setEditor(null);
+  };
 
   return (
     <main>
@@ -146,6 +163,17 @@ export default function Home() {
               <button onClick={() => moveWeek(1)} aria-label="Next week">→</button>
             </div>
           </section>
+          <section className="week-controls">
+            <label>Week begins on
+              <select value={data.weekStartsOn} onChange={e => {
+                const starts = Number(e.target.value);
+                setData(d => ({ ...d, weekStartsOn: starts, selectedWeek: startOfWeek(d.selectedWeek, starts) }));
+              }}>
+                {weekDays.map((day, index) => <option value={index} key={day}>{day}</option>)}
+              </select>
+            </label>
+            <button onClick={() => update("selectedWeek", startOfWeek(iso(today), data.weekStartsOn))}>Go to current week</button>
+          </section>
           <div className="demo-tools"><span>Using fictional tester data</span><button onClick={resetDemo} disabled={authRequired}>Reset demo data</button></div>
 
           <section className="balance-hero">
@@ -160,22 +188,22 @@ export default function Home() {
 
           <section className="grid">
             <div className="card weekly">
-              <div className="card-title"><div><p className="eyebrow">THIS WEEK</p><h2>Budget activity</h2></div><button className="outline" onClick={() => setModal("purchase")}>＋ Add purchase</button></div>
+              <div className="card-title"><div><p className="eyebrow">THIS WEEK</p><h2>Budget activity</h2></div><button className="outline" onClick={() => setEditor({ kind: "purchase" })}>＋ Add purchase</button></div>
               <div className="activity-head"><span>ITEM</span><span>DATE</span><span>AMOUNT</span></div>
               {[...data.bills.filter(b => inWeek(b.due) && !b.allocationStart).map(b => ({ id:b.id, name:b.biller, date:b.due, amount:b.amount, type:"BILL" })),
                 ...data.purchases.filter(p => inWeek(p.date) && !p.allocationStart).map(p => ({ id:p.id, name:p.what, date:p.date, amount:p.amount, type:"PURCHASE" }))].map(x =>
-                <div className="activity" key={x.id}><span className={`dot ${x.type === "BILL" ? "bill" : ""}`}></span><div><b>{x.name}</b><small>{x.type}</small></div><time>{pretty(x.date)}</time><strong>−{money(x.amount)}</strong></div>
+                <button className="activity activity-button" key={x.id} onClick={() => setEditor({ kind: x.type === "BILL" ? "bill" : "purchase", id: x.id })}><span className={`dot ${x.type === "BILL" ? "bill" : ""}`}></span><div><b>{x.name}</b><small>{x.type} · EDIT</small></div><time>{pretty(x.date)}</time><strong>−{money(x.amount)}</strong></button>
               )}
               <div className="activity allocation"><span className="dot later"></span><div><b>Future allocations</b><small>SET ASIDE</small></div><time>{allocations ? "Active" : "None"}</time><strong>−{money(allocations)}</strong></div>
               <div className="card-total"><span>Total out this week</span><strong>{money(directBills + directPurchases + allocations)}</strong></div>
             </div>
 
             <aside className="card upcoming">
-              <div className="card-title"><div><p className="eyebrow">CALENDAR</p><h2>Upcoming bills</h2></div><button className="add" onClick={() => setModal("bill")}>＋</button></div>
+              <div className="card-title"><div><p className="eyebrow">CALENDAR</p><h2>Upcoming bills</h2></div><button className="add" onClick={() => setEditor({ kind: "bill" })}>＋</button></div>
               <div className="bill-list">
-                {upcoming.map(b => <div className="bill-row" key={b.id}><div className="datebox"><b>{pretty(b.due, { day:"2-digit" })}</b><span>{pretty(b.due, { month:"short" }).toUpperCase()}</span></div><div><b>{b.biller}</b><span>{b.frequency}{b.occurrence ? " · scheduled" : ""}</span></div><strong>{money(b.amount)}</strong></div>)}
+                {upcoming.map(b => <button className="bill-row bill-button" key={b.id} onClick={() => setEditor({ kind: "bill", id: b.id })}><div className="datebox"><b>{pretty(b.due, { day:"2-digit" })}</b><span>{pretty(b.due, { month:"short" }).toUpperCase()}</span></div><div><b>{b.biller}</b><span>{b.frequency}{b.occurrence ? " · scheduled" : ""} · Edit</span></div><strong>{money(b.amount)}</strong></button>)}
               </div>
-              <button className="full" onClick={() => setModal("bill")}>Add a bill</button>
+              <button className="full" onClick={() => setEditor({ kind: "bill" })}>Add a bill</button>
             </aside>
           </section>
 
@@ -186,15 +214,17 @@ export default function Home() {
                 const name = "biller" in x ? x.biller : x.what;
                 const due = "due" in x ? x.due : x.date;
                 const saved = Math.min(x.amount, Math.max(0, Math.floor((new Date(week).getTime() - new Date(x.allocationStart!).getTime()) / 604800000) + 1) * x.amount / x.installments);
-                return <div className="later-card" key={x.id}><div><span className="tag">{pretty(due)}</span><h3>{name}</h3><p>{money(x.amount / x.installments)} per week · {x.installments} weeks</p></div><div className="progress"><span style={{ width: `${Math.min(100, saved / x.amount * 100)}%` }}></span></div><div className="saved"><b>{money(saved)}</b><span>of {money(x.amount)} allocated</span></div></div>
+                return <button className="later-card later-button" key={x.id} onClick={() => setEditor({ kind: "biller" in x ? "bill" : "purchase", id: x.id })}><div><span className="tag">{pretty(due)}</span><h3>{name}</h3><p>{money(x.amount / x.installments)} per week · {x.installments} weeks · Edit</p></div><div className="progress"><span style={{ width: `${Math.min(100, saved / x.amount * 100)}%` }}></span></div><div className="saved"><b>{money(saved)}</b><span>of {money(x.amount)} allocated</span></div></button>
               })}
             </div>
           </section>
         </>
       ) : <Goals data={data} setData={setData} />}
 
-      {modal && <Modal title={modal === "bill" ? "Add an upcoming bill" : "Add a purchase"} close={() => setModal(null)}>
-        {modal === "bill" ? <BillForm submit={addBill} week={week} /> : <PurchaseForm submit={addPurchase} week={week} />}
+      {editor && <Modal title={`${editor.id ? "Edit" : "Add"} ${editor.kind === "bill" ? "bill" : "purchase"}`} close={() => setEditor(null)}>
+        {editor.kind === "bill"
+          ? <BillForm submit={saveBill} week={week} initial={editingBill} remove={editor.id ? removeEntry : undefined} />
+          : <PurchaseForm submit={savePurchase} week={week} initial={editingPurchase} remove={editor.id ? removeEntry : undefined} />}
       </Modal>}
     </main>
   );
@@ -208,23 +238,24 @@ function Metric({ label, value }: { label:string; value:number }) { return <div 
 function Modal({ title, close, children }: { title:string; close:()=>void; children:React.ReactNode }) {
   return <div className="scrim" role="presentation" onMouseDown={e => e.target === e.currentTarget && close()}><section className="modal" role="dialog" aria-modal="true" aria-label={title}><button className="close" onClick={close}>×</button><p className="eyebrow">NEW ENTRY</p><h2>{title}</h2>{children}</section></div>;
 }
-function AllocationFields({ week }: { week:string }) {
-  const [on, setOn] = useState(false);
-  return <><label className="toggle"><input name="allocate" type="checkbox" checked={on} onChange={e=>setOn(e.target.checked)}/><span></span><div><b>Set money aside in advance</b><small>Deduct portions from earlier weekly budgets</small></div></label>{on && <div className="split"><label>Start deducting<input required name="allocationStart" type="date" defaultValue={week}/></label><label>Number of weeks<input required name="installments" type="number" min="1" max="52" defaultValue="4"/></label></div>}</>;
+function AllocationFields({ week, initial }: { week:string; initial?: Bill | Purchase }) {
+  const [on, setOn] = useState(Boolean(initial?.allocationStart));
+  return <><label className="toggle"><input name="allocate" type="checkbox" checked={on} onChange={e=>setOn(e.target.checked)}/><span></span><div><b>Set money aside in advance</b><small>Deduct portions from earlier weekly budgets</small></div></label>{on && <div className="split"><label>Start deducting<input required name="allocationStart" type="date" defaultValue={initial?.allocationStart || week}/></label><label>Number of weeks<input required name="installments" type="number" min="1" max="52" defaultValue={initial?.installments || 4}/></label></div>}</>;
 }
-function BillForm({ submit, week }: { submit:(e:FormEvent<HTMLFormElement>)=>void; week:string }) {
-  return <form onSubmit={submit}><label>Biller<input required name="biller" placeholder="e.g. Electric company"/></label><div className="split"><label>Amount<input required name="amount" type="number" min="0" step=".01" placeholder="0.00"/></label><label>Due date<input required name="due" type="date" defaultValue={week}/></label></div><label>Repeats<select name="frequency" defaultValue="Monthly"><option>One time</option><option>Weekly</option><option>Monthly</option><option>Quarterly</option><option>Biannual</option><option>Yearly</option></select></label><AllocationFields week={week}/><button className="primary">Add bill to budget</button></form>;
+function BillForm({ submit, week, initial, remove }: { submit:(e:FormEvent<HTMLFormElement>)=>void; week:string; initial?:Bill; remove?:()=>void }) {
+  return <form onSubmit={submit}><label>Biller<input required name="biller" placeholder="e.g. Electric company" defaultValue={initial?.biller}/></label><div className="split"><label>Amount<input required name="amount" type="number" min="0" step=".01" placeholder="0.00" defaultValue={initial?.amount}/></label><label>Due date<input required name="due" type="date" defaultValue={initial?.due || week}/></label></div><label>Repeats<select name="frequency" defaultValue={initial?.frequency || "Monthly"}><option>One time</option><option>Weekly</option><option>Monthly</option><option>Quarterly</option><option>Biannual</option><option>Yearly</option></select></label><AllocationFields week={week} initial={initial}/><div className="form-actions">{remove && <button type="button" className="danger" onClick={remove}>Delete</button>}<button className="primary">{initial ? "Save changes" : "Add bill to budget"}</button></div></form>;
 }
-function PurchaseForm({ submit, week }: { submit:(e:FormEvent<HTMLFormElement>)=>void; week:string }) {
-  return <form onSubmit={submit}><label>What was it for?<input required name="what" placeholder="e.g. Shipping supplies"/></label><div className="split"><label>Amount<input required name="amount" type="number" min="0" step=".01" placeholder="0.00"/></label><label>Purchase date<input required name="date" type="date" defaultValue={week}/></label></div><AllocationFields week={week}/><button className="primary">Add purchase</button></form>;
+function PurchaseForm({ submit, week, initial, remove }: { submit:(e:FormEvent<HTMLFormElement>)=>void; week:string; initial?:Purchase; remove?:()=>void }) {
+  return <form onSubmit={submit}><label>What was it for?<input required name="what" placeholder="e.g. Shipping supplies" defaultValue={initial?.what}/></label><div className="split"><label>Amount<input required name="amount" type="number" min="0" step=".01" placeholder="0.00" defaultValue={initial?.amount}/></label><label>Purchase date<input required name="date" type="date" defaultValue={initial?.date || week}/></label></div><AllocationFields week={week} initial={initial}/><div className="form-actions">{remove && <button type="button" className="danger" onClick={remove}>Delete</button>}<button className="primary">{initial ? "Save changes" : "Add purchase"}</button></div></form>;
 }
 function Goals({ data, setData }: { data:AppState; setData:React.Dispatch<React.SetStateAction<AppState>> }) {
   const [kind, setKind] = useState<"debt"|"saving">("debt");
   const add = () => setData(d => ({...d, goals:[...d.goals, { id:uid(), name:kind==="debt"?"New debt":"New savings goal", current:0, target:1000, updated:iso(today), kind }]}));
   const change = (id:string, patch:Partial<Goal>) => setData(d => ({...d, goals:d.goals.map(g=>g.id===id?{...g,...patch,updated:iso(today)}:g)}));
+  const remove = (id:string) => confirm("Delete this debt or goal?") && setData(d => ({...d, goals:d.goals.filter(g=>g.id!==id)}));
   const shown = data.goals.filter(g=>g.kind===kind);
   return <section className="goals-page"><div className="intro"><div><p className="eyebrow">THE BIG PICTURE</p><h1>Build breathing room.</h1><p>Update balances as they change and see how far you’ve come.</p></div><button className="primary compact" onClick={add}>＋ Add {kind === "debt" ? "debt" : "goal"}</button></div><div className="goal-tabs"><button className={kind==="debt"?"active":""} onClick={()=>setKind("debt")}>Debts</button><button className={kind==="saving"?"active":""} onClick={()=>setKind("saving")}>Savings goals</button></div><div className="goal-grid">{shown.map(g => {
     const pct = g.kind==="debt" ? Math.max(0, 100-(g.current/g.target*100)) : Math.min(100,g.current/g.target*100);
-    return <article className="goal-card" key={g.id}><span className="goal-icon">{g.kind==="debt"?"↘":"↗"}</span><input className="goal-name" value={g.name} onChange={e=>change(g.id,{name:e.target.value})}/><p>{g.kind==="debt"?"Current balance":"Amount saved"}</p><div className="goal-money">$<input type="number" value={g.current} onChange={e=>change(g.id,{current:Number(e.target.value)})}/></div><div className="goal-progress"><span style={{width:`${pct}%`}}></span></div><div className="goal-meta"><span>{Math.round(pct)}% {g.kind==="debt"?"paid":"funded"}</span><span>Goal {money(g.target)}</span></div><footer>Last updated {pretty(g.updated, {month:"short",day:"numeric",year:"numeric"})}</footer></article>
+    return <article className="goal-card" key={g.id}><button className="goal-delete" onClick={()=>remove(g.id)} aria-label={`Delete ${g.name}`}>×</button><span className="goal-icon">{g.kind==="debt"?"↘":"↗"}</span><input className="goal-name" value={g.name} onChange={e=>change(g.id,{name:e.target.value})}/><p>{g.kind==="debt"?"Current balance":"Amount saved"}</p><div className="goal-money">$<input type="number" value={g.current} onChange={e=>change(g.id,{current:Number(e.target.value)})}/></div><label className="goal-target">Target $<input type="number" min="0" value={g.target} onChange={e=>change(g.id,{target:Number(e.target.value)})}/></label><div className="goal-progress"><span style={{width:`${pct}%`}}></span></div><div className="goal-meta"><span>{Math.round(pct)}% {g.kind==="debt"?"paid":"funded"}</span><span>Goal {money(g.target)}</span></div><footer>Last updated {pretty(g.updated, {month:"short",day:"numeric",year:"numeric"})}</footer></article>
   })}</div></section>;
 }
