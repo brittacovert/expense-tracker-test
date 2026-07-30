@@ -8,8 +8,10 @@ type Bill = {
 };
 type Purchase = { id: string; what: string; amount: number; date: string; allocationStart?: string; installments: number };
 type Goal = { id: string; name: string; current: number; target: number; updated: string; kind: "debt" | "saving" };
+type WeekValues = { cash: number; income: number };
 type AppState = {
   weekStartsOn: number; selectedWeek: string; cash: number; income: number;
+  weeklyValues?: Record<string, WeekValues>;
   bills: Bill[]; purchases: Purchase[]; goals: Goal[];
 };
 
@@ -33,6 +35,7 @@ const seed: AppState = {
   selectedWeek: "2026-08-03",
   cash: 1800,
   income: 950,
+  weeklyValues: { "2026-08-03": { cash: 1800, income: 950 } },
   bills: [
     { id: "b1", biller: "Studio rent", amount: 720, due: "2026-08-05", frequency: "Monthly", installments: 1 },
     { id: "b2", biller: "Electric service", amount: 86, due: "2026-08-07", frequency: "Monthly", installments: 1 },
@@ -51,6 +54,11 @@ const seed: AppState = {
 const recurrenceDays: Record<string, number> = { Weekly: 7, Monthly: 30, Quarterly: 91, Biannual: 182, Yearly: 365 };
 const weekDays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 type Editor = { kind: "bill"; id?: string } | { kind: "purchase"; id?: string };
+const normalizeState = (state: AppState): AppState => {
+  if (state.weeklyValues) return state;
+  const legacyWeek = startOfWeek(state.selectedWeek, state.weekStartsOn);
+  return { ...state, weeklyValues: { [legacyWeek]: { cash: state.cash || 0, income: state.income || 0 } } };
+};
 
 export default function Home() {
   const [data, setData] = useState<AppState>(seed);
@@ -63,7 +71,7 @@ export default function Home() {
     fetch("/api/state").then(r => {
       if (r.status === 401) setAuthRequired(true);
       return r.ok ? r.json() : Promise.reject();
-    }).then(v => v.state && setData(v.state)).catch(() => {}).finally(() => setLoaded(true));
+    }).then(v => v.state && setData(normalizeState(v.state))).catch(() => {}).finally(() => setLoaded(true));
   }, []);
   useEffect(() => {
     if (!loaded || authRequired) return;
@@ -76,12 +84,13 @@ export default function Home() {
     const response = await fetch("/api/state", { method: "DELETE" });
     if (response.ok) {
       const value = await response.json();
-      setData(value.state);
+      setData(normalizeState(value.state));
     }
   }
 
   const week = startOfWeek(data.selectedWeek, data.weekStartsOn);
   const weekEnd = addDays(week, 6);
+  const weekValues = data.weeklyValues?.[week] || { cash: 0, income: 0 };
   const inWeek = (date: string) => date >= week && date <= weekEnd;
   const directBills = data.bills.filter(b => inWeek(b.due) && !b.allocationStart).reduce((s, b) => s + b.amount, 0);
   const directPurchases = data.purchases.filter(p => inWeek(p.date) && !p.allocationStart).reduce((s, p) => s + p.amount, 0);
@@ -91,10 +100,17 @@ export default function Home() {
     const end = addDays(startOfWeek(x.allocationStart, data.weekStartsOn), (n - 1) * 7);
     return week >= startOfWeek(x.allocationStart, data.weekStartsOn) && week <= end;
   }).reduce((s, x) => s + x.amount / Math.max(1, x.installments), 0);
-  const available = data.cash + data.income - directBills - directPurchases - allocations;
+  const available = weekValues.cash + weekValues.income - directBills - directPurchases - allocations;
   const upcoming = useMemo(() => data.bills.filter(b => b.due >= week).sort((a,b) => a.due.localeCompare(b.due)).slice(0, 7), [data.bills, week]);
 
   const update = <K extends keyof AppState>(key: K, value: AppState[K]) => setData(d => ({ ...d, [key]: value }));
+  const updateWeekValue = (key: keyof WeekValues, value: number) => setData(d => ({
+    ...d,
+    weeklyValues: {
+      ...d.weeklyValues,
+      [week]: { ...(d.weeklyValues?.[week] || { cash: 0, income: 0 }), [key]: value },
+    },
+  }));
   const moveWeek = (n: number) => update("selectedWeek", addDays(week, n * 7));
 
   function saveBill(e: FormEvent<HTMLFormElement>) {
@@ -167,7 +183,14 @@ export default function Home() {
             <label>Week begins on
               <select value={data.weekStartsOn} onChange={e => {
                 const starts = Number(e.target.value);
-                setData(d => ({ ...d, weekStartsOn: starts, selectedWeek: startOfWeek(d.selectedWeek, starts) }));
+                setData(d => ({
+                  ...d,
+                  weekStartsOn: starts,
+                  selectedWeek: startOfWeek(d.selectedWeek, starts),
+                  weeklyValues: Object.fromEntries(
+                    Object.entries(d.weeklyValues || {}).map(([date, values]) => [startOfWeek(date, starts), values]),
+                  ),
+                }));
               }}>
                 {weekDays.map((day, index) => <option value={index} key={day}>{day}</option>)}
               </select>
@@ -179,8 +202,8 @@ export default function Home() {
           <section className="balance-hero">
             <div><p>AVAILABLE TO SPEND</p><strong className={available < 0 ? "negative" : ""}>{money(available)}</strong><span>{pretty(week)} – {pretty(weekEnd, { month: "short", day: "numeric", year: "numeric" })}</span></div>
             <div className="equation">
-              <EditableMoney label="Cash at BOW" value={data.cash} onChange={v => update("cash", v)} />
-              <i>+</i><EditableMoney label="Projected income" value={data.income} onChange={v => update("income", v)} />
+              <EditableMoney label="Cash at BOW" value={weekValues.cash} onChange={v => updateWeekValue("cash", v)} />
+              <i>+</i><EditableMoney label="Projected income" value={weekValues.income} onChange={v => updateWeekValue("income", v)} />
               <i>−</i><Metric label="Bills & spending" value={directBills + directPurchases} />
               <i>−</i><Metric label="Set aside for later" value={allocations} />
             </div>
