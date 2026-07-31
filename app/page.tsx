@@ -9,10 +9,11 @@ type Bill = {
 type Purchase = { id: string; what: string; amount: number; date: string; allocationStart?: string; installments: number };
 type Goal = { id: string; name: string; current: number; target: number; updated: string; kind: "debt" | "saving" };
 type WeekValues = { cash: number; income: number };
+type PriorityPurchase = { id: string; what: string; amount: number; notes?: string };
 type AppState = {
   weekStartsOn: number; selectedWeek: string; cash: number; income: number;
   weeklyValues?: Record<string, WeekValues>;
-  bills: Bill[]; purchases: Purchase[]; goals: Goal[];
+  bills: Bill[]; purchases: Purchase[]; goals: Goal[]; wishlist?: PriorityPurchase[];
 };
 
 const today = new Date();
@@ -36,6 +37,10 @@ const seed: AppState = {
   cash: 1800,
   income: 950,
   weeklyValues: { "2026-08-03": { cash: 1800, income: 950 } },
+  wishlist: [
+    { id: "w1", what: "Label printer", amount: 189, notes: "Would speed up shipping days" },
+    { id: "w2", what: "Extra display shelving", amount: 320, notes: "Buy when a strong week leaves room" },
+  ],
   bills: [
     { id: "b1", biller: "Studio rent", amount: 720, due: "2026-08-05", frequency: "Monthly", installments: 1 },
     { id: "b2", biller: "Electric service", amount: 86, due: "2026-08-07", frequency: "Monthly", installments: 1 },
@@ -55,15 +60,20 @@ const recurrenceDays: Record<string, number> = { Weekly: 7, Monthly: 30, Quarter
 const weekDays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 type Editor = { kind: "bill"; id?: string } | { kind: "purchase"; id?: string };
 const normalizeState = (state: AppState): AppState => {
-  if (state.weeklyValues) return state;
   const legacyWeek = startOfWeek(state.selectedWeek, state.weekStartsOn);
-  return { ...state, weeklyValues: { [legacyWeek]: { cash: state.cash || 0, income: state.income || 0 } } };
+  return {
+    ...state,
+    weeklyValues: state.weeklyValues || { [legacyWeek]: { cash: state.cash || 0, income: state.income || 0 } },
+    wishlist: state.wishlist || [],
+  };
 };
 
 export default function Home() {
   const [data, setData] = useState<AppState>(seed);
-  const [tab, setTab] = useState<"plan" | "goals">("plan");
+  const [tab, setTab] = useState<"plan" | "priorities" | "goals">("plan");
   const [editor, setEditor] = useState<Editor | null>(null);
+  const [priorityEditor, setPriorityEditor] = useState<string | "new" | null>(null);
+  const [convertingPriorityId, setConvertingPriorityId] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [authRequired, setAuthRequired] = useState(false);
 
@@ -102,6 +112,7 @@ export default function Home() {
   }).reduce((s, x) => s + x.amount / Math.max(1, x.installments), 0);
   const available = weekValues.cash + weekValues.income - directBills - directPurchases - allocations;
   const upcoming = useMemo(() => data.bills.filter(b => b.due >= week).sort((a,b) => a.due.localeCompare(b.due)).slice(0, 7), [data.bills, week]);
+  const affordablePriority = (data.wishlist || []).find(item => item.amount <= available);
 
   const update = <K extends keyof AppState>(key: K, value: AppState[K]) => setData(d => ({ ...d, [key]: value }));
   const updateWeekValue = (key: keyof WeekValues, value: number) => setData(d => ({
@@ -143,11 +154,15 @@ export default function Home() {
       installments: f.get("allocate") ? Number(f.get("installments")) || 1 : 1,
     };
     setData(d => ({ ...d, purchases: editor?.id ? d.purchases.map(item => item.id === editor.id ? p : item) : [...d.purchases, p] }));
+    if (convertingPriorityId) setData(d => ({ ...d, wishlist: (d.wishlist || []).filter(item => item.id !== convertingPriorityId) }));
     setEditor(null);
+    setConvertingPriorityId(null);
   }
 
   const editingBill = editor?.kind === "bill" && editor.id ? data.bills.find(b => b.id === editor.id) : undefined;
   const editingPurchase = editor?.kind === "purchase" && editor.id ? data.purchases.find(p => p.id === editor.id) : undefined;
+  const convertingPriority = convertingPriorityId ? (data.wishlist || []).find(item => item.id === convertingPriorityId) : undefined;
+  const purchaseInitial = editingPurchase || (convertingPriority ? { id: "", what: convertingPriority.what, amount: convertingPriority.amount, date: week, installments: 1 } : undefined);
   const removeEntry = () => {
     if (!editor?.id || !confirm("Delete this entry?")) return;
     setData(d => editor.kind === "bill"
@@ -155,6 +170,8 @@ export default function Home() {
       : { ...d, purchases: d.purchases.filter(p => p.id !== editor.id) });
     setEditor(null);
   };
+  const closeEditor = () => { setEditor(null); setConvertingPriorityId(null); };
+  const schedulePriority = (id: string) => { setConvertingPriorityId(id); setEditor({ kind: "purchase" }); };
 
   return (
     <main>
@@ -162,6 +179,7 @@ export default function Home() {
         <a className="brand" href="#"><span>◎</span> BOW</a>
         <nav aria-label="Main navigation">
           <button className={tab === "plan" ? "active" : ""} onClick={() => setTab("plan")}>Weekly plan</button>
+          <button className={tab === "priorities" ? "active" : ""} onClick={() => setTab("priorities")}>Purchase priorities</button>
           <button className={tab === "goals" ? "active" : ""} onClick={() => setTab("goals")}>Debts & goals</button>
         </nav>
         <button className="avatar" aria-label="Account menu">B</button>
@@ -198,6 +216,8 @@ export default function Home() {
             <button onClick={() => update("selectedWeek", startOfWeek(iso(today), data.weekStartsOn))}>Go to current week</button>
           </section>
           <div className="demo-tools"><span>Using fictional tester data</span><button onClick={resetDemo} disabled={authRequired}>Reset demo data</button></div>
+
+          {affordablePriority && <section className="priority-prompt"><div><span>ROOM IN THIS WEEK'S BUDGET</span><b>{affordablePriority.what} is your highest priority that fits.</b><small>{money(affordablePriority.amount)} leaves {money(available - affordablePriority.amount)} available.</small></div><button onClick={() => schedulePriority(affordablePriority.id)}>Add to upcoming purchases</button></section>}
 
           <section className="balance-hero">
             <div><p>AVAILABLE TO SPEND</p><strong className={available < 0 ? "negative" : ""}>{money(available)}</strong><span>{pretty(week)} – {pretty(weekEnd, { month: "short", day: "numeric", year: "numeric" })}</span></div>
@@ -242,12 +262,20 @@ export default function Home() {
             </div>
           </section>
         </>
-      ) : <Goals data={data} setData={setData} />}
+      ) : tab === "priorities"
+        ? <Priorities data={data} setData={setData} available={available} edit={setPriorityEditor} schedule={schedulePriority} />
+        : <Goals data={data} setData={setData} />}
 
-      {editor && <Modal title={`${editor.id ? "Edit" : "Add"} ${editor.kind === "bill" ? "bill" : "purchase"}`} close={() => setEditor(null)}>
+      {editor && <Modal title={`${editor.id ? "Edit" : convertingPriority ? "Schedule" : "Add"} ${editor.kind === "bill" ? "bill" : "purchase"}`} close={closeEditor}>
         {editor.kind === "bill"
           ? <BillForm submit={saveBill} week={week} initial={editingBill} remove={editor.id ? removeEntry : undefined} />
-          : <PurchaseForm submit={savePurchase} week={week} initial={editingPurchase} remove={editor.id ? removeEntry : undefined} />}
+          : <PurchaseForm submit={savePurchase} week={week} initial={purchaseInitial} editing={Boolean(editor.id)} remove={editor.id ? removeEntry : undefined} />}
+      </Modal>}
+      {priorityEditor && <Modal title={priorityEditor === "new" ? "Add purchase priority" : "Edit purchase priority"} close={() => setPriorityEditor(null)}>
+        <PriorityForm initial={priorityEditor === "new" ? undefined : (data.wishlist || []).find(item => item.id === priorityEditor)} submit={(item) => {
+          setData(d => ({ ...d, wishlist: priorityEditor === "new" ? [...(d.wishlist || []), item] : (d.wishlist || []).map(old => old.id === item.id ? item : old) }));
+          setPriorityEditor(null);
+        }} />
       </Modal>}
     </main>
   );
@@ -268,8 +296,19 @@ function AllocationFields({ week, initial }: { week:string; initial?: Bill | Pur
 function BillForm({ submit, week, initial, remove }: { submit:(e:FormEvent<HTMLFormElement>)=>void; week:string; initial?:Bill; remove?:()=>void }) {
   return <form onSubmit={submit}><label>Biller<input required name="biller" placeholder="e.g. Electric company" defaultValue={initial?.biller}/></label><div className="split"><label>Amount<input required name="amount" type="number" min="0" step=".01" placeholder="0.00" defaultValue={initial?.amount}/></label><label>Due date<input required name="due" type="date" defaultValue={initial?.due || week}/></label></div><label>Repeats<select name="frequency" defaultValue={initial?.frequency || "Monthly"}><option>One time</option><option>Weekly</option><option>Monthly</option><option>Quarterly</option><option>Biannual</option><option>Yearly</option></select></label><AllocationFields week={week} initial={initial}/><div className="form-actions">{remove && <button type="button" className="danger" onClick={remove}>Delete</button>}<button className="primary">{initial ? "Save changes" : "Add bill to budget"}</button></div></form>;
 }
-function PurchaseForm({ submit, week, initial, remove }: { submit:(e:FormEvent<HTMLFormElement>)=>void; week:string; initial?:Purchase; remove?:()=>void }) {
-  return <form onSubmit={submit}><label>What was it for?<input required name="what" placeholder="e.g. Shipping supplies" defaultValue={initial?.what}/></label><div className="split"><label>Amount<input required name="amount" type="number" min="0" step=".01" placeholder="0.00" defaultValue={initial?.amount}/></label><label>Purchase date<input required name="date" type="date" defaultValue={initial?.date || week}/></label></div><AllocationFields week={week} initial={initial}/><div className="form-actions">{remove && <button type="button" className="danger" onClick={remove}>Delete</button>}<button className="primary">{initial ? "Save changes" : "Add purchase"}</button></div></form>;
+function PurchaseForm({ submit, week, initial, editing, remove }: { submit:(e:FormEvent<HTMLFormElement>)=>void; week:string; initial?:Purchase; editing?:boolean; remove?:()=>void }) {
+  return <form onSubmit={submit}><label>What was it for?<input required name="what" placeholder="e.g. Shipping supplies" defaultValue={initial?.what}/></label><div className="split"><label>Amount<input required name="amount" type="number" min="0" step=".01" placeholder="0.00" defaultValue={initial?.amount}/></label><label>Purchase date<input required name="date" type="date" defaultValue={initial?.date || week}/></label></div><AllocationFields week={week} initial={initial}/><div className="form-actions">{remove && <button type="button" className="danger" onClick={remove}>Delete</button>}<button className="primary">{editing ? "Save changes" : "Add purchase"}</button></div></form>;
+}
+
+function PriorityForm({ initial, submit }: { initial?:PriorityPurchase; submit:(item:PriorityPurchase)=>void }) {
+  return <form onSubmit={e => { e.preventDefault(); const f = new FormData(e.currentTarget); submit({ id:initial?.id || uid(), what:String(f.get("what")), amount:Number(f.get("amount")), notes:String(f.get("notes") || "") }); }}><label>What would you like to buy?<input required name="what" defaultValue={initial?.what} placeholder="e.g. Label printer"/></label><label>Estimated cost<input required name="amount" type="number" min="0" step=".01" defaultValue={initial?.amount} placeholder="0.00"/></label><label>Notes<textarea name="notes" defaultValue={initial?.notes} placeholder="Why it matters, preferred model, vendor, etc."/></label><button className="primary">{initial ? "Save priority" : "Add to priority list"}</button></form>;
+}
+
+function Priorities({ data, setData, available, edit, schedule }: { data:AppState; setData:React.Dispatch<React.SetStateAction<AppState>>; available:number; edit:(id:string|"new")=>void; schedule:(id:string)=>void }) {
+  const items = data.wishlist || [];
+  const move = (index:number, direction:number) => setData(d => { const next=[...(d.wishlist || [])]; const target=index+direction; if(target<0 || target>=next.length) return d; [next[index],next[target]]=[next[target],next[index]]; return {...d,wishlist:next}; });
+  const remove = (id:string) => confirm("Delete this purchase priority?") && setData(d => ({...d,wishlist:(d.wishlist || []).filter(item=>item.id!==id)}));
+  return <section className="priorities-page"><div className="intro"><div><p className="eyebrow">BUY WHEN THE TIME IS RIGHT</p><h1>Purchase priorities.</h1><p>Keep good ideas in order without putting them on the budget before they are real.</p></div><button className="primary compact" onClick={()=>edit("new")}>＋ Add priority</button></div><div className="priority-summary"><span>Available in viewed week</span><b>{money(available)}</b><small>The first item that fits is suggested on the Weekly plan tab.</small></div><div className="priority-list">{items.length === 0 ? <div className="empty-priorities"><b>No purchase priorities yet.</b><span>Add something useful that can wait for the right week.</span></div> : items.map((item,index) => <article className="priority-row" key={item.id}><span className="priority-number">{index+1}</span><div className="priority-copy"><b>{item.what}</b><span>{item.notes || "No notes"}</span></div><strong>{money(item.amount)}</strong><span className={`fit-badge ${item.amount <= available ? "fits" : ""}`}>{item.amount <= available ? "Fits this week" : "Waiting"}</span><div className="priority-actions"><button disabled={index===0} onClick={()=>move(index,-1)} aria-label={`Move ${item.what} up`}>↑</button><button disabled={index===items.length-1} onClick={()=>move(index,1)} aria-label={`Move ${item.what} down`}>↓</button><button onClick={()=>edit(item.id)}>Edit</button><button className="remove-priority" onClick={()=>remove(item.id)}>Delete</button><button className="schedule-priority" onClick={()=>schedule(item.id)}>Add to budget</button></div></article>)}</div></section>;
 }
 function Goals({ data, setData }: { data:AppState; setData:React.Dispatch<React.SetStateAction<AppState>> }) {
   const [kind, setKind] = useState<"debt"|"saving">("debt");
